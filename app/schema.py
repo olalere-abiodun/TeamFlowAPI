@@ -46,3 +46,6 @@ class OrganizationResponce(BaseModel):
     
     model_config = ConfigDict(from_attributes=True)
     
+class InvitationCreate(BaseModel):
+    organization_id: int
+    email: EmailStr
