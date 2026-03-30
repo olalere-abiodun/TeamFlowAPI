@@ -3,6 +3,19 @@ from sqlalchemy.orm import Session
 from app import schema, model, security
 
 
+# Helper function 
+def get_membership(db: Session, org_id: int, user_id: str):
+    membership = db.query(model.Membership).filter(
+        model.Membership.organization_id == org_id,
+        model.Membership.user_id == user_id,
+        model.Membership.status == "accepted"
+    ).first()
+
+    if not membership:
+        raise HTTPException(403, "Not authorized")
+
+    return membership
+
 def create_organization( organization: schema.createOrganization, db: Session, current_user: schema.CurrentUser):
     db_organization = model.Organization(
         name=organization.name,
@@ -26,25 +39,50 @@ def get_member_organizations(db: Session, current_user: schema.CurrentUser):
 
 #Get organization details
 def get_organization(organization_id: int, db: Session, current_user: schema.CurrentUser):
-    db_organization = db.query(model.Organization).filter(model.Organization.id == organization_id).first()
-    return db_organization
+    # Check organization exists
+    org = db.query(model.Organization).filter(
+        model.Organization.id == organization_id
+    ).first()
+
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Authorization: Only owner or members can view
+    membership = get_membership(db, organization_id,current_user.uid )
+
+    if not membership and org.owner_id != current_user.uid:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this organization"
+        )
+    return org
 
 # Update organization
 def update_organization(organization_id: int, db: Session, current_user: schema.CurrentUser, organization: schema.UpdateOrganization):
-    db_organization = model.Organization(
-        name = organization.name,
-        description = organization.description
-        )
-    db.add(db_organization)
+    db_organization = db.query(model.Organization).filter(model.Organization.id == organization_id).first()
+    if db_organization is None:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    # Authorization: Only owner can update
+    if db_organization.owner_id != current_user.uid:
+        raise HTTPException(status_code=403, detail="Only organization owner can update the organization")
+    # Update fields
+    if organization.name is not None:
+        db_organization.name = organization.name
+    if organization.description is not None:
+        db_organization.description = organization.description
+
     db.commit()
     db.refresh(db_organization)
     return db_organization
-
-#Delete organization
+    
+ #Delete organization
 def delete_organization(organization_id: int, db: Session, current_user: schema.CurrentUser):
     db_organization = db.query(model.Organization).filter(model.Organization.id == organization_id).first()
     if db_organization is None:
         raise HTTPException(status_code=404, detail="Organization not found")
+    # Authorization: Only owner can delete
+    if db_organization.owner_id != current_user.uid:
+        raise HTTPException(status_code=403, detail="Only organization owner can delete the organization")
     db.delete(db_organization)
     db.commit()
 
@@ -100,19 +138,6 @@ def list_members(organization_id: int, db: Session, current_user: schema.Current
     members = db.query(model.Membership).filter(model.Membership.organization_id == organization_id).all()
     return members
 
-# Helper function 
-def get_membership(db: Session, org_id: int, user_id: str):
-    membership = db.query(model.Membership).filter(
-        model.Membership.organization_id == org_id,
-        model.Membership.user_id == user_id,
-        model.Membership.status == "accepted"
-    ).first()
-
-    if not membership:
-        raise HTTPException(403, "Not authorized")
-
-    return membership
-
 
 # Accept invitation
 def accept_invitation(organization_id: int, db: Session, current_user: schema.CurrentUser):
@@ -125,7 +150,11 @@ def accept_invitation(organization_id: int, db: Session, current_user: schema.Cu
         raise HTTPException(status_code=404, detail="Organization not found")
 
     # Check if user has a pending invite
-    membership = get_membership(db, organization_id, current_user.uid)
+    membership = db.query(model.Membership).filter(
+        model.Membership.organization_id == organization_id,
+        model.Membership.user_id == current_user.uid,
+        model.Membership.status == "pending"
+    ).first()
 
     if not membership:
         raise HTTPException(status_code=404, detail="No pending invitation found for this user")
@@ -147,14 +176,51 @@ def reject_invitation(organization_id: int, db: Session, current_user: schema.Cu
         raise HTTPException(status_code=404, detail="Organization not found")
 
     # Check if user has a pending invite
-    membership = get_membership(db, organization_id, current_user.uid)
+    membership = db.query(model.Membership).filter(
+        model.Membership.organization_id == organization_id,
+        model.Membership.user_id == current_user.uid,
+        model.Membership.status == "pending"
+    ).first()
 
     if not membership:
         raise HTTPException(status_code=404, detail="No pending invitation found for this user")
 
-    # Reject the invitation (delete the membership record)
-    db.delete(membership)
+    # Reject the invitation
+    membership.status = "rejected"
+
     db.commit()
+    db.refresh(membership)
+
+    return {"message": "Invitation rejected"}
+
+# Organization owner add admin
+def add_admin(organization_id: int, user_id: str, db: Session, current_user: schema.CurrentUser):
+    # Check organization exists
+    org = db.query(model.Organization).filter(
+        model.Organization.id == organization_id
+    ).first()
+
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Authorization: Only owner can add admin
+    if org.owner_id != current_user.uid:
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization owner can add admins"
+        )
+
+    # Check if user is a member
+    membership = get_membership(db, organization_id, user_id)
+
+    if not membership:
+        raise HTTPException(status_code=404, detail="User is not a member of this organization")
+
+    # Update role to admin
+    membership.role = "admin"
+    db.commit()
+    db.refresh(membership)
+    return membership
 
 # Remove member from organization
 def remove_member(organization_id: int, user_id: str, db: Session, current_user: schema.CurrentUser):
@@ -166,7 +232,7 @@ def remove_member(organization_id: int, user_id: str, db: Session, current_user:
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Authorization: Only owner can remove members
+    # Authorization: Only owner and admin can remove members
     if org.owner_id != current_user.uid:
         raise HTTPException(
             status_code=403,
@@ -174,14 +240,41 @@ def remove_member(organization_id: int, user_id: str, db: Session, current_user:
         )
 
     # Check if user is a member
-    membership = get_membership(db, organization_id, user_id)
+    current_membership = get_membership(db, organization_id, current_user.uid)
+    # Authorization: owner or admin
+    if current_membership.role not in ["owner", "admin"]:
+        raise HTTPException(403, "Not authorized to remove members")
 
-    if not membership:
-        raise HTTPException(status_code=404, detail="User is not a member of this organization")
+    # Get target user membership
+    target_membership = db.query(model.Membership).filter(
+        model.Membership.organization_id == organization_id,
+        model.Membership.user_id == user_id
+    ).first()
 
-    # Remove the member (delete the membership record)
-    db.delete(membership)
+    if not target_membership:
+        raise HTTPException(404, "User is not a member of this organization")
+
+    # Prevent removing owner
+    if target_membership.role == "owner":
+        raise HTTPException(403, "Cannot remove organization owner")
+
+    #  Admin cannot remove another admin (optional rule)
+    if (
+        current_membership.role == "admin" and
+        target_membership.role == "admin"
+    ):
+        raise HTTPException(403, "Admin cannot remove another admin")
+
+    #  Prevent self-removal (optional)
+    if user_id == current_user.uid:
+        raise HTTPException(400, "You cannot remove yourself")
+
+    # Remove member
+    db.delete(target_membership)
     db.commit()
+
+    return {"message": "Member removed successfully"}
+
 
 # Organization create projects, list projects, get project details, update project, delete project
 # create new project
@@ -195,13 +288,14 @@ def create_project(organization_id: int, project: schema.ProjectCreate, db: Sess
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Authorization: Only owner can create projects
-    if org.owner_id != current_user.uid:
+    # Authorization: Only owner and admin can create projects
+    membership = get_membership(db, organization_id, current_user.uid)
+
+    if membership.role not in ["owner", "admin"]:
         raise HTTPException(
             status_code=403,
-            detail="Only organization owner can create projects"
+            detail="Only organization owner and admin can create projects"
         )
-
     db_project = model.Project(
         organization_id=organization_id,
         name=project.name,
@@ -223,13 +317,7 @@ def list_projects(organization_id: int, db: Session, current_user: schema.Curren
         raise HTTPException(status_code=404, detail="Organization not found")
 
     # Authorization: Only members can view projects
-    membership = get_membership(db, organization_id, current_user.uid)
-
-    if not membership and org.owner_id != current_user.uid:
-        raise HTTPException(
-            status_code=403,
-            detail="Only organization members can view projects"
-        )
+    get_membership(db, organization_id, current_user.uid)
 
     projects = db.query(model.Project).filter(model.Project.organization_id == organization_id).offset(skip).limit(limit).all()
     return projects
@@ -247,17 +335,26 @@ def get_project(organization_id: int, project_id: int, db: Session, current_user
     # Authorization: Only members can view projects
     membership = get_membership(db, organization_id, current_user.uid)
 
-    if not membership and org.owner_id != current_user.uid:
+    if not membership:
         raise HTTPException(
             status_code=403,
             detail="Only organization members can view projects"
         )
 
     project = db.query(model.Project).filter(model.Project.organization_id == organization_id, model.Project.id == project_id).first()
+
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
     return project
 
 # update project
-def update_project(organization_id: int, project_id: int, project: schema.ProjectCreate, db: Session, current_user: schema.CurrentUser):
+def update_project(
+    organization_id: int,
+    project_id: int,
+    project: schema.ProjectUpdate,
+    db: Session,
+    current_user: schema.CurrentUser
+):
     # Check organization exists
     org = db.query(model.Organization).filter(
         model.Organization.id == organization_id
@@ -266,21 +363,34 @@ def update_project(organization_id: int, project_id: int, project: schema.Projec
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Authorization: Only owner can update projects
-    if org.owner_id != current_user.uid:
+    # Authorization (RBAC)
+    membership = get_membership(db, organization_id, current_user.uid)
+
+    if membership.role not in ["owner", "admin"]:
         raise HTTPException(
             status_code=403,
-            detail="Only organization owner can update projects"
+            detail="Only owner or admin can update projects"
         )
 
-    db_project = db.query(model.Project).filter(model.Project.organization_id == organization_id, model.Project.id == project_id).first()
+    # Get project
+    db_project = db.query(model.Project).filter(
+        model.Project.organization_id == organization_id,
+        model.Project.id == project_id
+    ).first()
+
     if not db_project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    db_project.name = project.name
-    db_project.description = project.description
+    # Partial update
+    if project.name is not None:
+        db_project.name = project.name
+
+    if project.description is not None:
+        db_project.description = project.description
+
     db.commit()
     db.refresh(db_project)
+
     return db_project
 
 # Delete project
@@ -294,19 +404,29 @@ def delete_project(organization_id: int, project_id: int, db: Session, current_u
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Authorization: Only owner can delete projects
-    if org.owner_id != current_user.uid:
+    # Authorization: Only owner and admin can delete projects
+    membership = get_membership(db, organization_id, current_user.uid)
+
+    if membership.role not in ["owner", "admin"]:
         raise HTTPException(
             status_code=403,
-            detail="Only organization owner can delete projects"
+            detail="Only owner or admin can delete projects"
         )
 
-    db_project = db.query(model.Project).filter(model.Project.organization_id == organization_id, model.Project.id == project_id).first()
+    # Get project
+    db_project = db.query(model.Project).filter(
+        model.Project.organization_id == organization_id,
+        model.Project.id == project_id
+    ).first()
+
     if not db_project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # Delete project
     db.delete(db_project)
     db.commit()
+
+    return {"message": "Project deleted successfully"}
 
 # create board, list boards, get board details, update board, delete board
 # create board 
@@ -318,12 +438,14 @@ def create_board(project_id: int, board: schema.BoardCreate, db: Session, curren
 
     # Authorization: Only organization owner or members can create boards
     org = db.query(model.Organization).filter(model.Organization.id == project.organization_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    
     membership = get_membership(db, project.organization_id, current_user.uid)
-
-    if not membership and org.owner_id != current_user.uid:
-        raise HTTPException(
+    if membership.role not in ["owner", "admin"]:
+         raise HTTPException(
             status_code=403,
-            detail="Only organization members can create boards"
+            detail="Only organization owner and admin can create boards"
         )
 
     db_board = model.Board(
@@ -341,12 +463,19 @@ def list_boards(project_id: int, db: Session, current_user: schema.CurrentUser):
     project = db.query(model.Project).filter(model.Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Check organization exists
+    org = db.query(model.Organization).filter(
+        model.Organization.id == project.organization_id
+    ).first()
+
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
 
     # Authorization check
-    org = db.query(model.Organization).filter(model.Organization.id == project.organization_id).first()
     membership = get_membership(db, project.organization_id, current_user.uid)
 
-    if not membership and org.owner_id != current_user.uid:
+    if not membership:
         raise HTTPException(
             status_code=403,
             detail="Only organization members can view boards"
@@ -359,17 +488,17 @@ def get_board(project_id: int, board_id: int, db: Session, current_user: schema.
     project = db.query(model.Project).filter(model.Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-
-    # Authorization check
-    org = db.query(model.Organization).filter(model.Organization.id == project.organization_id).first()
+    
     membership = get_membership(db, project.organization_id, current_user.uid)
 
-    if not membership and org.owner_id != current_user.uid:
+    if not membership:
         raise HTTPException(
             status_code=403,
             detail="Only organization members can view boards"
         )
     board = db.query(model.Board).filter(model.Board.project_id == project_id, model.Board.id == board_id).first()
+    if not board:
+        raise HTTPException(status_code=404, detail="Board not found")
     return board
 
 #Update board
@@ -380,12 +509,15 @@ def update_board(project_id: int, board_id: int, board: schema.BoardCreate, db: 
 
     # Authorization check
     org = db.query(model.Organization).filter(model.Organization.id == project.organization_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    
     membership = get_membership(db, project.organization_id, current_user.uid)
 
-    if not membership and org.owner_id != current_user.uid:
+    if membership.role not in ["owner", "admin"]:
         raise HTTPException(
             status_code=403,
-            detail="Only organization members can update boards"
+            detail="Only organization owners and admins can update boards"
         )
     db_board = db.query(model.Board).filter(model.Board.project_id == project_id, model.Board.id == board_id).first()
     if not db_board:
@@ -405,12 +537,15 @@ def delete_board(project_id: int, board_id: int, db: Session, current_user: sche
 
     # Authorization check
     org = db.query(model.Organization).filter(model.Organization.id == project.organization_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    
     membership = get_membership(db, project.organization_id, current_user.uid)
 
-    if not membership and org.owner_id != current_user.uid:
+    if membership.role not in ["owner", "admin"]:
         raise HTTPException(
             status_code=403,
-            detail="Only organization members can delete boards"
+            detail="Only organization owners and admins can delete boards"
         )
     db_board = db.query(model.Board).filter(model.Board.project_id == project_id, model.Board.id == board_id).first()
     if not db_board:
@@ -421,34 +556,80 @@ def delete_board(project_id: int, board_id: int, db: Session, current_user: sche
 
 # create task, list tasks, get task details, update task, delete task
 def create_task(board_id: int, task: schema.TaskCreate, db: Session, current_user: schema.CurrentUser):
-    # Check board exists and get project and organization
-    board = db.query(model.Board).filter(model.Board.id == board_id).first()
+    #  Check board exists
+    board = db.query(model.Board).filter(
+        model.Board.id == board_id
+    ).first()
+
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
 
-    project = db.query(model.Project).filter(model.Project.id == board.project_id).first()
-    org = db.query(model.Organization).filter(model.Organization.id == project.organization_id).first()
+    #  Get project
+    project = db.query(model.Project).filter(
+        model.Project.id == board.project_id
+    ).first()
 
-    # Authorization: Only organization owner or members can create tasks
-    membership = get_membership(db, org.id, current_user.uid)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
 
-    if not membership and org.owner_id != current_user.uid:
+    #  Check creator membership + role
+    membership = get_membership(
+        db,
+        project.organization_id,
+        current_user.uid
+    )
+
+    if membership.role not in ["owner", "admin"]:
         raise HTTPException(
             status_code=403,
-            detail="Only organization members can create tasks"
+            detail="Only owners and admins can create tasks"
         )
 
+    #  Validate assignee (if provided)
+    assignee_id = task.assignee_id if hasattr(task, "assignee_id") else None
+
+    if assignee_id:
+        assignee = db.query(model.User).filter(
+            model.User.uid == assignee_id
+        ).first()
+
+        if not assignee:
+            raise HTTPException(
+                status_code=404,
+                detail="Assignee not found"
+            )
+
+        # Ensure assignee belongs to same organization
+        assignee_membership = get_membership(
+            db,
+            project.organization_id,
+            assignee_id
+        )
+
+        if not assignee_membership:
+            raise HTTPException(
+                status_code=400,
+                detail="Assignee is not a member of this organization"
+            )
+
+    # Create task
     db_task = model.Task(
         board_id=board_id,
+        project_id=project.id,
+        organization_id=project.organization_id,
         title=task.title,
         description=task.description,
-        status=task.status,
-        priority=task.priority,
-        due_date=task.due_date
+        status=task.status.value if hasattr(task.status, "value") else task.status,
+        priority=task.priority.value if hasattr(task.priority, "value") else task.priority,
+        due_date=task.due_date,
+        created_by=current_user.uid, 
+        assignee_id=assignee_id        
     )
+
     db.add(db_task)
     db.commit()
     db.refresh(db_task)
+
     return db_task
 
 # list task 
@@ -459,7 +640,7 @@ def list_tasks(org_id: int, project_id: int, db: Session, current_user: schema.C
     ).first()
 
     if not org:
-        raise HTTPException(404, "Organization not found")
+        raise HTTPException(status_code=404, detail= "Organization not found")
 
     # Check project belongs to org
     project = db.query(model.Project).filter(
@@ -476,7 +657,7 @@ def list_tasks(org_id: int, project_id: int, db: Session, current_user: schema.C
     if not membership:
         raise HTTPException(403, "Not authorized")
 
-    # Base query (IMPORTANT CHANGE)
+    # Base query
     query = db.query(model.Task).filter(
         model.Task.project_id == project_id,
         model.Task.organization_id == org_id
@@ -484,13 +665,13 @@ def list_tasks(org_id: int, project_id: int, db: Session, current_user: schema.C
 
     # Filters
     if status:
-        query = query.filter(model.Task.status == status)
+        query = query.filter(model.Task.status == status.value if hasattr(status, "value") else status)
 
     if assignee_id:
         query = query.filter(model.Task.assignee_id == assignee_id)
 
     if priority:
-        query = query.filter(model.Task.priority == priority)
+        query = query.filter(model.Task.priority == priority.value if hasattr(priority, "value") else priority)
 
     # Pagination
     tasks = query.offset(skip).limit(limit).all()
@@ -514,13 +695,13 @@ def get_task(org_id: int, project_id: int, task_id: int, db: Session, current_us
     ).first()
 
     if not project:
-        raise HTTPException(404, "Project not found in this organization")
+        raise HTTPException(status_code=404, detail="Project not found in this organization")
 
     # Authorization
     membership = get_membership(db, org_id, current_user.uid)
 
     if not membership:
-        raise HTTPException(403, "Not authorized")
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     task = db.query(model.Task).filter(
         model.Task.id == task_id,
@@ -529,24 +710,37 @@ def get_task(org_id: int, project_id: int, task_id: int, db: Session, current_us
     ).first()
 
     if not task:
-        raise HTTPException(404, "Task not found")
+        raise HTTPException(status_code=404, detail="Task not found")
 
     return task
 
 # Update task 
-def update_task(org_id: int, project_id: int, task_id: int, task_update: schema.TaskUpdate, db: Session, current_user: schema.CurrentUser):
-    # Check organization
-    org = db.query(model.Organization).filter(model.Organization.id == org_id).first()
+def update_task(
+    org_id: int,
+    project_id: int,
+    task_id: int,
+    task_update: schema.TaskUpdate,
+    db: Session,
+    current_user: schema.CurrentUser
+):
+    # 🔍 Check organization
+    org = db.query(model.Organization).filter(
+        model.Organization.id == org_id
+    ).first()
+
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Authorization: Check if user is owner or accepted member
-    membership = get_membership(db, org_id, current_user.uid)
+    # 🔍 Check project belongs to org
+    project = db.query(model.Project).filter(
+        model.Project.id == project_id,
+        model.Project.organization_id == org_id
+    ).first()
 
-    if not membership and org.owner_id != current_user.uid:
-        raise HTTPException(status_code=403, detail="Not authorized to update tasks in this organization")
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found in this organization")
 
-    # Get the task
+    # 🔍 Get task
     db_task = db.query(model.Task).filter(
         model.Task.id == task_id,
         model.Task.project_id == project_id,
@@ -556,14 +750,23 @@ def update_task(org_id: int, project_id: int, task_id: int, task_update: schema.
     if not db_task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Update fields if provided
+    # 🔒 ONLY CREATOR CAN UPDATE
+    if db_task.created_by != current_user.uid:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the task creator can update this task"
+        )
+
     update_data = task_update.model_dump(exclude_unset=True)
+
     for key, value in update_data.items():
         setattr(db_task, key, value)
 
     db.commit()
     db.refresh(db_task)
+
     return db_task
+
 
 # Delete task
 def delete_task(org_id: int, project_id: int, task_id: int, db: Session, current_user: schema.CurrentUser):
@@ -572,10 +775,6 @@ def delete_task(org_id: int, project_id: int, task_id: int, db: Session, current
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Authorization: Only owner can delete tasks
-    # Authorization: Check if user is owner or accepted member
-    if org.owner_id != current_user.uid:
-        raise HTTPException(status_code=403, detail="Only organization owner can delete tasks in this organization")
     # Get the task
     db_task = db.query(model.Task).filter(model.Task.id == task_id,
         model.Task.project_id == project_id,
@@ -584,9 +783,52 @@ def delete_task(org_id: int, project_id: int, task_id: int, db: Session, current
 
     if not db_task:
         raise HTTPException(status_code=404, detail="Task not found")
+    
+    if db_task.created_by != current_user.uid:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the task creator can delete this task"
+        )
+
 
     db.delete(db_task)
     db.commit()
     
+#assign and unassign user to task
+def assign_task(org_id: int, project_id: int, task_id: int, assignee_id: str, db: Session, current_user: schema.CurrentUser):
+    # Check organization
+    org = db.query(model.Organization).filter(model.Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Get the task
+    db_task = db.query(model.Task).filter(model.Task.id == task_id,
+        model.Task.project_id == project_id,
+        model.Task.organization_id == org_id
+    ).first()
+
+    if not db_task:
+        raise HTTPException(status_code=404, detail="Task not found")
     
+    # Only creator can assign/unassign
+    if db_task.created_by != current_user.uid:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the task creator can assign or unassign this task"
+        )
+    if assignee_id:
+        # Validate assignee
+        assignee = db.query(model.User).filter(model.User.uid == assignee_id).first()
+        if not assignee:
+            raise HTTPException(status_code=404, detail="Assignee not found")
+
+        # Ensure assignee belongs to same organization
+        assignee_membership = get_membership(db, org_id, assignee_id)
+        if not assignee_membership:
+            raise HTTPException(status_code=400, detail="Assignee is not a member of this organization") 
+          
+    db_task.assignee_id = assignee_id
+    db.commit()
+    db.refresh(db_task)
+    return db_task  
 

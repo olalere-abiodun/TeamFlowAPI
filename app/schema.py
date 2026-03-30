@@ -6,6 +6,7 @@ from datetime import datetime, date, timedelta
 class UserRole(str, Enum):
     USER = "user"
     OWNER = "owner"
+    ADMIN = "admin"
 
 class TaskStatus(str, Enum):
     TODO = "todo"
@@ -65,6 +66,10 @@ class ProjectCreate(BaseModel):
     name: str
     description: Optional[str] = None
 
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
 class BoardCreate(BaseModel):
     project_id: int
     name: str
@@ -74,6 +79,7 @@ class TaskCreate(BaseModel):
     board_id: int
     title: str
     description: Optional[str] = None
+    assignee_id: Optional[str] = None
     status: TaskStatus = TaskStatus.TODO
     priority: TaskPriority = TaskPriority.MEDIUM
     due_date: Optional[date] = None
