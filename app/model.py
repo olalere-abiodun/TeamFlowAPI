@@ -17,6 +17,8 @@ class User(Base):
 
     Organization = relationship("Organization", back_populates="user")
     memberships = relationship("Membership", back_populates="user", cascade="all, delete-orphan")
+    comments = relationship("Comment", back_populates="author", cascade="all, delete-orphan")
+    file_attachments = relationship("FileAttachment", back_populates="uploader", cascade="all, delete-orphan")
 
 
 class Organization(Base):
@@ -110,6 +112,32 @@ class Task(Base):
     creator = relationship("User", foreign_keys=[created_by])
     project = relationship("Project", back_populates="tasks")
     organization = relationship("Organization", back_populates="tasks")
+    comments = relationship("Comment", back_populates="task", cascade="all, delete-orphan")
 
+class Comment(Base):
+    __tablename__ = 'comments'
 
+    id = Column(Integer, primary_key=True, index=True)
+    task_id = Column(Integer, ForeignKey('tasks.id'), nullable=False)
+    author_id = Column(String, ForeignKey('users.uid'), nullable=False)
+    comment = Column(String(1000), nullable=False)
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, onupdate=func.now())
 
+    task = relationship("Task", back_populates="comments")
+    author = relationship("User", back_populates="comments")
+    attachments = relationship("FileAttachment", back_populates="task", cascade="all, delete-orphan")
+
+class FileAttachment(Base):
+    __tablename__ = 'file_attachments'
+
+    id = Column(Integer, primary_key=True, index=True)
+    task_id = Column(Integer, ForeignKey('tasks.id'), nullable=False)
+    filepath = Column(String(500), nullable=False)
+    file_name = Column(String(255), nullable=False)
+    uploaded_by = Column(String, ForeignKey('users.uid'), nullable=False)
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, onupdate=func.now())
+
+    task = relationship("Task", back_populates="attachments")
+    uploader = relationship("User", back_populates="file_attachments") 

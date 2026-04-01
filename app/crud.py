@@ -1,6 +1,9 @@
 from fastapi import Depends, HTTPException
 from sqlalchemy.orm import Session
 from app import schema, model, security
+import shutil
+import os
+import uuid
 
 
 # Helper function 
@@ -832,3 +835,215 @@ def assign_task(org_id: int, project_id: int, task_id: int, assignee_id: str, db
     db.refresh(db_task)
     return db_task  
 
+# Add Comment to task 
+def add_comment(task_id: int, content: schema.CommentCreate, db: Session, current_user: schema.CurrentUser):
+    # Check task exists
+    task = db.query(model.Task).filter(model.Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Check organization exists
+    org = db.query(model.Organization).filter(
+        model.Organization.id == task.organization_id
+    ).first()
+
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Authorization check
+    membership = get_membership(db, task.organization_id, current_user.uid)
+
+    if not membership:
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization members can comment on tasks"
+        )
+
+    db_comment = model.Comment(
+        task_id=task_id,
+        author_id=current_user.uid,
+        comment=content.comment
+    )
+
+    db.add(db_comment)
+    db.commit()
+    db.refresh(db_comment)
+
+    return db_comment
+
+# list comments 
+def list_comments(task_id: int, db: Session, current_user: schema.CurrentUser):
+    # Check task exists
+    task = db.query(model.Task).filter(model.Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Check organization exists
+    org = db.query(model.Organization).filter(
+        model.Organization.id == task.organization_id
+    ).first()
+
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Authorization check
+    membership = get_membership(db, task.organization_id, current_user.uid)
+
+    if not membership:
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization members can view comments on tasks"
+        )
+
+    comments = db.query(model.Comment).filter(model.Comment.task_id == task_id).all()
+    return comments
+
+# Edit comment 
+def edit_comment(comment_id: int, content: schema.CommentCreate, db: Session, current_user: schema.CurrentUser):
+    db_comment = db.query(model.Comment).filter(model.Comment.id == comment_id).first()
+    if not db_comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    if db_comment.author_id != current_user.uid:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the comment author can edit this comment"
+        )
+
+    db_comment.comment = content.comment
+    db.commit()
+    db.refresh(db_comment)
+    return db_comment
+
+# Delete comment
+def delete_comment(comment_id: int, db: Session, current_user: schema.CurrentUser):
+    db_comment = db.query(model.Comment).filter(model.Comment.id == comment_id).first()
+    if not db_comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    if db_comment.author_id != current_user.uid:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the comment author can delete this comment"
+        )
+
+    db.delete(db_comment)
+    db.commit()
+
+# file attachment 
+# Upload file to task 
+import os
+import shutil
+import uuid
+from fastapi import HTTPException, UploadFile, File, Depends
+from sqlalchemy.orm import Session
+
+def upload_file(
+    task_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: schema.CurrentUser = Depends(get_current_user)
+):
+    # Check task exists
+    task = db.query(model.Task).filter(model.Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Check organization exists
+    org = db.query(model.Organization).filter(
+        model.Organization.id == task.organization_id
+    ).first()
+
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Authorization check
+    membership = get_membership(db, task.organization_id, current_user.uid)
+    if not membership:
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization members can upload files to tasks"
+        )
+
+    # Ensure folder exists
+    task_folder = f"files/tasks/{task_id}"
+    os.makedirs(task_folder, exist_ok=True)
+
+    filename = os.path.basename(file.filename)
+    unique_name = f"{uuid.uuid4()}_{filename}"
+
+    file_location = f"{task_folder}/{unique_name}"
+
+    # Save file
+    with open(file_location, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    # Save record in DB
+    db_attachment = model.FileAttachment(
+        task_id=task_id,
+        filename=filename,
+        filepath=file_location,
+        uploaded_by=current_user.uid
+    )
+
+    db.add(db_attachment)
+    db.commit()
+    db.refresh(db_attachment)
+
+    return db_attachment
+
+# list all task attachments 
+def list_attachments(task_id: int, db: Session, current_user: schema.CurrentUser):
+    # Check task exists
+    task = db.query(model.Task).filter(model.Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Check organization exists
+    org = db.query(model.Organization).filter(
+        model.Organization.id == task.organization_id
+    ).first()
+
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Authorization check
+    membership = get_membership(db, task.organization_id, current_user.uid)
+
+    if not membership:
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization members can view attachments on tasks"
+        )
+
+    attachments = db.query(model.FileAttachment).filter(model.FileAttachment.task_id == task_id).all()
+    return attachments
+
+# delete file attachment
+import os
+from fastapi import HTTPException
+
+def delete_attachment(attachment_id: int, db: Session, current_user: schema.CurrentUser):
+    attachment = db.query(model.FileAttachment).filter(
+        model.FileAttachment.id == attachment_id
+    ).first()
+
+    if not attachment:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    # ✅ Check if user is the uploader (owner of the file)
+    if attachment.uploaded_by != current_user.uid:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only delete files you uploaded"
+        )
+
+    # ✅ Delete file from storage
+    if attachment.filepath and os.path.exists(attachment.filepath):
+        os.remove(attachment.filepath)
+
+    # ✅ Delete record from DB
+    db.delete(attachment)
+    db.commit()
+
+    return {"detail": "Attachment deleted successfully"}

@@ -91,4 +91,5 @@ class TaskUpdate(BaseModel):
     priority: Optional[TaskPriority] = None
     due_date: Optional[date] = None
 
-
+class CommentCreate(BaseModel):
+    comment: str
