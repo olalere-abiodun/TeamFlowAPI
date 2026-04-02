@@ -1,16 +1,36 @@
+import os
+from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app import schema, model, security
 from app.dependencies import get_db
 from app.security import get_current_user
 from app.model import User
+import firebase_admin
 from firebase_admin import auth
+from firebase_admin import credentials, initialize_app
+from app.routers.util import send_email
+from fastapi import BackgroundTasks
+
+load_dotenv()
+
+cred_env = os.getenv("FIREBASE_CRED_PATH")
+
+if not cred_env:
+    raise Exception("FIREBASE_CRED_PATH not set in .env")
+
+cred_path = os.path.abspath(cred_env)
+
+if not firebase_admin._apps:
+    cred = credentials.Certificate(cred_path)
+    initialize_app(cred)
+
 
 router = APIRouter(prefix="/auth", tags=["User Authentication Operations"])
 
 
 @router.post("/register")
-def register_user(user: schema.UserCreate, db: Session = Depends(get_db)):
+def register_user(user: schema.UserCreate, db: Session = Depends(get_db), background_tasks: BackgroundTasks = None):
     # Check if user already exists
     existing_user = db.query(User).filter(User.email == user.email).first()
     if existing_user:
@@ -35,15 +55,33 @@ def register_user(user: schema.UserCreate, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(new_user)
 
-        return {"message": "User registered successfully", 
-                "user": {
-                    "uid": new_user.uid,
-                    "name": new_user.full_name,
-                    "email": new_user.email}
-                    }
+        link = auth.generate_email_verification_link(firebase_user.email)
+
+        # Send email (non-blocking logic)
+        try:
+            background_tasks.add_task(send_email, user.email, link)
+        except Exception as email_error:
+            print("Email sending failed:", email_error)
+
+        return {
+            "message": "User registered successfully. Verification email sent.",
+            "user": {
+                "uid": new_user.uid,
+                "name": new_user.full_name,
+                "email": new_user.email
+            }
+        }
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        db.rollback()
+
+        try:
+            if 'firebase_user' in locals():
+                auth.delete_user(firebase_user.uid)
+        except:
+            pass
+
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/login")
 def login_user():
@@ -52,27 +90,61 @@ def login_user():
     return {"message": "Login should be handled on the client side using Firebase Authentication SDKs."}
 
 @router.get("/me", response_model=schema.CurrentUser)
-def get_me(current_user: schema.CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_me(
+    current_user: schema.CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     user = db.query(User).filter(User.uid == current_user.uid).first()
+
     if not user:
         raise HTTPException(status_code=404, detail="User not found in database")
 
-    return schema.CurrentUser(uid=user.uid, email=user.email)
+    try:
+        # Get latest Firebase user state
+        firebase_user = auth.get_user(current_user.uid)
+
+        # Sync email verification status
+        if user.is_verified != firebase_user.email_verified:
+            user.is_verified = firebase_user.email_verified
+            db.commit()
+            db.refresh(user)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Firebase sync failed: {str(e)}")
+
+    return {
+        "uid": user.uid,
+        "email": user.email,
+        "is_verified": user.is_verified
+    }
+
 
 
 @router.post("/send-verification-email")
-def send_verification_email(current_user: schema.CurrentUser = Depends(get_current_user)):
+def send_verification_email(
+    current_user: schema.CurrentUser = Depends(get_current_user),
+    background_tasks: BackgroundTasks = None
+):
     try:
-        # 🔗 Generate verification link
+        firebase_user = auth.get_user(current_user.uid)
+
+        # 🚫 Prevent spam if already verified
+        if firebase_user.email_verified:
+            raise HTTPException(status_code=400, detail="Email already verified")
+
+        # 🔗 Generate link
         link = auth.generate_email_verification_link(current_user.email)
 
-        return {
-            "message": "Verification email link generated",
-            "verification_link": link  # ⚠️ For testing only
-        }
+        # 📧 Send email
+        if background_tasks:
+            background_tasks.add_task(send_email, current_user.email, link)
+        else:
+            send_email(current_user.email, link)
+
+        return {"message": "Verification email sent successfully"}
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Refresh access token endpoint (if needed for server-side sessions)
 @router.post("/refresh-token")
@@ -89,11 +161,5 @@ def logout_user():
 # google oauth login 
 @router.post("/google-login")
 def google_login():
-    # Google OAuth login is handled on the client side using Firebase Authentication SDKs.
-    return {"message": "Google OAuth login should be handled on the client side using Firebase Authentication SDKs."}
-
-# google oauth login2 
-@router.post("/google-login2")
-def google_login2():
     # Google OAuth login is handled on the client side using Firebase Authentication SDKs.
     return {"message": "Google OAuth login should be handled on the client side using Firebase Authentication SDKs."}
