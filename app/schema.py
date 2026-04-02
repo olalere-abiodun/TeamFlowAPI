@@ -21,7 +21,11 @@ class TaskPriority(str, Enum):
 
 class UserBase(BaseModel):
     email: EmailStr
-    name: Optional[str] = Field(default=None, max_length=255)
+    full_name: str
+
+class UserCreate(UserBase):
+    password: str = Field(..., min_length=8)
+    role: UserRole = UserRole.USER
 
 class UserInDB(UserBase):
     uid: str
@@ -37,6 +41,15 @@ class UserInDB(UserBase):
 class CurrentUser(BaseModel):
     uid: str
     email: str | None = None
+    
+class UserResponse(BaseModel):
+    uid: str
+    email: EmailStr
+    full_name: str
+    is_verified: bool
+ 
+
+    model_config = ConfigDict(from_attributes=True)
 
 class createOrganization(BaseModel):
     name: str
