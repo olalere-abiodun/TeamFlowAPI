@@ -13,12 +13,14 @@ class User(Base):
     is_verified = Column(Boolean, default=False)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    Organization = relationship("Organization", back_populates="user")
+    organizations = relationship("Organization", back_populates="user")
     memberships = relationship("Membership", back_populates="user", cascade="all, delete-orphan")
     comments = relationship("Comment", back_populates="author", cascade="all, delete-orphan")
     file_attachments = relationship("FileAttachment", back_populates="uploader", cascade="all, delete-orphan")
+    assigned_tasks = relationship("Task", foreign_keys="Task.assignee_id", back_populates="assignee")
+    created_tasks = relationship("Task", foreign_keys="Task.created_by", back_populates="creator")
 
 
 class Organization(Base):
@@ -32,11 +34,12 @@ class Organization(Base):
     owner_id = Column(String(128), ForeignKey('users.uid'), nullable=False)
 
     user = relationship("User", back_populates="organizations")
-    invitations = relationship("invitation", back_populates="organization", cascade="all, delete-orphan")
+    invitations = relationship("Invitation", back_populates="organization", cascade="all, delete-orphan")
     memberships = relationship("Membership", back_populates="organization", cascade="all, delete-orphan")
     projects = relationship("Project", back_populates="organization", cascade="all, delete-orphan")
+    tasks = relationship("Task", back_populates="organization", cascade="all, delete-orphan")
 
-class invitation(Base):
+class Invitation(Base):
     __tablename__ = 'invitations'
 
     id = Column(Integer, primary_key=True, index=True)
@@ -67,10 +70,11 @@ class Project(Base):
     name = Column(String(255), nullable=False)
     description = Column(String(500), nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
-    updated_at = Column(TIMESTAMP, onupdate=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     organization = relationship("Organization", back_populates="projects")
     boards = relationship("Board", back_populates="project", cascade="all, delete-orphan")
+    tasks = relationship("Task", back_populates="project", cascade="all, delete-orphan")
 
 class Board(Base):
     __tablename__ = 'boards'
@@ -83,6 +87,7 @@ class Board(Base):
     updated_at = Column(TIMESTAMP, onupdate=func.now())
 
     project = relationship("Project", back_populates="boards")
+    tasks = relationship("Task", back_populates="board")
 
 class Task(Base):
     __tablename__ = 'tasks'
@@ -92,27 +97,25 @@ class Task(Base):
     organization_id = Column(Integer, ForeignKey("organizations.id"))
     project_id = Column(Integer, ForeignKey("projects.id"))
     board_id = Column(Integer, ForeignKey('boards.id'), nullable=False)
-
     title = Column(String(255), nullable=False)
     description = Column(String(500), nullable=True)
-
     status = Column(String(50), default="todo")
     priority = Column(String(20), default="medium")
-
     assignee_id = Column(String, ForeignKey("users.uid"), nullable=True)
     created_by = Column(String, ForeignKey("users.uid"))
 
     due_date = Column(DateTime, nullable=True)
 
     created_at = Column(TIMESTAMP, server_default=func.now())
-    updated_at = Column(TIMESTAMP, onupdate=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     board = relationship("Board", back_populates="tasks")
-    assignee = relationship("User", foreign_keys=[assignee_id])
-    creator = relationship("User", foreign_keys=[created_by])
+    assignee = relationship("User", foreign_keys=[assignee_id], back_populates="assigned_tasks")
+    creator = relationship("User", foreign_keys=[created_by], back_populates="created_tasks")
     project = relationship("Project", back_populates="tasks")
     organization = relationship("Organization", back_populates="tasks")
     comments = relationship("Comment", back_populates="task", cascade="all, delete-orphan")
+    attachments = relationship("FileAttachment", back_populates="task", cascade="all, delete-orphan")
 
 class Comment(Base):
     __tablename__ = 'comments'
@@ -122,11 +125,10 @@ class Comment(Base):
     author_id = Column(String, ForeignKey('users.uid'), nullable=False)
     comment = Column(String(1000), nullable=False)
     created_at = Column(TIMESTAMP, server_default=func.now())
-    updated_at = Column(TIMESTAMP, onupdate=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     task = relationship("Task", back_populates="comments")
     author = relationship("User", back_populates="comments")
-    attachments = relationship("FileAttachment", back_populates="task", cascade="all, delete-orphan")
 
 class FileAttachment(Base):
     __tablename__ = 'file_attachments'
@@ -137,7 +139,7 @@ class FileAttachment(Base):
     file_name = Column(String(255), nullable=False)
     uploaded_by = Column(String, ForeignKey('users.uid'), nullable=False)
     created_at = Column(TIMESTAMP, server_default=func.now())
-    updated_at = Column(TIMESTAMP, onupdate=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     task = relationship("Task", back_populates="attachments")
     uploader = relationship("User", back_populates="file_attachments") 

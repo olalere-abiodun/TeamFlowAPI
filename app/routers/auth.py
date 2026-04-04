@@ -1,6 +1,7 @@
+# pylint: disable=invalid-name
 import os
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from app import schema, model, security
 from app.dependencies import get_db
@@ -89,11 +90,8 @@ def login_user():
     # This endpoint can be used to provide any additional server-side logic if needed.
     return {"message": "Login should be handled on the client side using Firebase Authentication SDKs."}
 
-@router.get("/me", response_model=schema.CurrentUser)
-def get_me(
-    current_user: schema.CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+@router.get("/me")
+def get_me(current_user: schema.CurrentUser = Depends(get_current_user),db: Session = Depends(get_db)):
     user = db.query(User).filter(User.uid == current_user.uid).first()
 
     if not user:
@@ -112,11 +110,7 @@ def get_me(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Firebase sync failed: {str(e)}")
 
-    return {
-        "uid": user.uid,
-        "email": user.email,
-        "is_verified": user.is_verified
-    }
+    return user
 
 
 
@@ -128,14 +122,14 @@ def send_verification_email(
     try:
         firebase_user = auth.get_user(current_user.uid)
 
-        # 🚫 Prevent spam if already verified
+        # Prevent spam if already verified
         if firebase_user.email_verified:
             raise HTTPException(status_code=400, detail="Email already verified")
 
-        # 🔗 Generate link
+        # Generate link
         link = auth.generate_email_verification_link(current_user.email)
 
-        # 📧 Send email
+        # Send email
         if background_tasks:
             background_tasks.add_task(send_email, current_user.email, link)
         else:
